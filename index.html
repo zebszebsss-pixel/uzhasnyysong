@@ -264,7 +264,7 @@ body.yton{padding-bottom:calc(400px + env(safe-area-inset-bottom))}
 .seg{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin:14px 0;padding:4px;border-radius:16px;background:var(--glass);border:1px solid var(--line)}
 .seg button{min-height:38px;background:none;color:var(--ash);font-size:14px;border-radius:12px;padding:0 4px}
 .seg button.on{background:var(--milk);color:#111;font-weight:600}
-.chat{display:flex;flex-direction:column;gap:10px;padding-bottom:6px}
+.chat{display:flex;flex-direction:column;gap:10px;padding-bottom:16px}
 .msg{max-width:84%;padding:10px 14px;border-radius:18px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.45}
 .msg.u{align-self:flex-end;background:var(--milk);color:#111;border-bottom-right-radius:6px}
 .msg.a{background:var(--glass);border:1px solid var(--line);border-bottom-left-radius:6px}
@@ -366,7 +366,7 @@ select{font:15px Manrope,sans-serif;min-height:40px;padding:0 10px;border-radius
 <nav class="tabs" id="tabs">
   <button data-act="tab" data-t="home" class="on"><span data-ic="home"></span>Главная</button>
   <button data-act="tab" data-t="search"><span data-ic="search"></span>Поиск</button>
-  <button data-act="tab" data-t="ai"><span data-ic="hp"></span>AI Manager</button>
+  <button data-act="tab" data-t="ai"><span data-ic="hp"></span>Ужасный AI</button>
   <button data-act="tab" data-t="lib"><span data-ic="lib"></span>Библиотека</button>
   <button data-act="tab" data-t="profile"><span data-ic="user"></span>Профиль</button>
 </nav>
@@ -388,7 +388,7 @@ select{font:15px Manrope,sans-serif;min-height:40px;padding:0 10px;border-radius
 
 <script>
 {
-const APP='Ужасныйsong',VER='5.0';
+const APP='Ужасныйsong',VER='5.1';
 /* Ключ YouTube Data API для полных песен. Можно вставить сюда или в Настройках приложения. */
 const YT_KEY='';
 const $=id=>document.getElementById(id);
@@ -1055,7 +1055,7 @@ const MOUTH={
   o:'<ellipse cx="401" cy="466" rx="15" ry="19" fill="#0b0b0c"/>'
 };
 const EMO_MOUTH={happy:'grin',neutral:'grin',excited:'big',sad:'sad',thinking:'smirk',cool:'smirk',surprised:'o'};
-const mgrHtml=()=>`<div class="mgr" data-st="idle"><svg viewBox="128 100 530 600" role="img" aria-label="AI Manager"><g class="hd"><image href="${MGR.base}" x="128" y="100" width="530" height="600"/><g class="mo"></g><image class="ec" href="${MGR.closed}" x="286" y="338" width="226" height="68" visibility="hidden"/><image class="es" href="${MGR.side}" x="286" y="338" width="226" height="68" visibility="hidden"/></g><circle class="wv" cx="203" cy="345" r="18"/><circle class="wv" cx="598" cy="345" r="18"/></svg><div class="dots"><i></i><i></i><i></i></div></div>`;
+const mgrHtml=()=>`<div class="mgr" data-st="idle"><svg viewBox="128 100 530 600" role="img" aria-label="Ужасный AI"><g class="hd"><image href="${MGR.base}" x="128" y="100" width="530" height="600"/><g class="mo"></g><image class="ec" href="${MGR.closed}" x="286" y="338" width="226" height="68" visibility="hidden"/><image class="es" href="${MGR.side}" x="286" y="338" width="226" height="68" visibility="hidden"/></g><circle class="wv" cx="203" cy="345" r="18"/><circle class="wv" cx="598" cy="345" r="18"/></svg><div class="dots"><i></i><i></i><i></i></div></div>`;
 const M={el:null,emo:'neutral',st:'idle',talkT:0,blinkT:0};
 function mgrMouth(k){const g=M.el&&M.el.querySelector('.mo');if(g&&g.dataset.k!==k){g.innerHTML=MOUTH[k]||MOUTH.grin;g.dataset.k=k}}
 function mgrEyes(k){if(!M.el)return;M.el.querySelector('.ec').setAttribute('visibility',k==='closed'?'visible':'hidden');M.el.querySelector('.es').setAttribute('visibility',k==='side'?'visible':'hidden')}
@@ -1090,15 +1090,17 @@ function aiPrefs(){const a=aiP(),p=prof();if(!a.consent.prefs)return{};
   return Object.assign({},a.prefs,{artists:[...new Set([...a.prefs.artists,...fav])]})}
 async function aiCall(body){
   if(!/^https?:/.test(location.protocol))return{error:'local'};
+  const ctl=new AbortController(),tm=setTimeout(()=>ctl.abort(),45000);
   try{
-    const r=await fetch('/api/ai',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const r=await fetch('/api/ai',{method:'POST',signal:ctl.signal,headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    clearTimeout(tm);
     if(r.status===404||r.status===405)return{error:'noapi'};
     const d=await r.json().catch(()=>({error:'bad'}));
     if(!r.ok||d.error)return{error:d.error||('http'+r.status)};
     return d;
-  }catch(e){return{error:'net'}}
+  }catch(e){clearTimeout(tm);return{error:e&&e.name==='AbortError'?'timeout':'net'}}
 }
-const aiErr=c=>({local:'Мой мозг работает только на сайте: открой uzhasnyysong.vercel.app.',noapi:'Мой мозг ещё не подключён: нужно загрузить файл api/ai.js в GitHub (инструкция у Claude в чате).',nokey:'Не вижу ключа нейросети: добавь GEMINI_API_KEY в настройках Vercel и сделай Redeploy.',badkey:'Ключ нейросети не принят. Проверь GEMINI_API_KEY в Vercel.',quota:'Бро, лимит запросов на сегодня исчерпан. Давай чуть позже.',slow:'Слишком быстро, дай секунду отдышаться.',net:'Нет связи с сервером. Проверь интернет.'}[c]||'Что-то пошло не так со связью. Попробуй ещё раз.');
+const aiErr=c=>({local:'Мой мозг работает только на сайте: открой uzhasnyysong.vercel.app.',noapi:'Мой мозг ещё не подключён: нужно загрузить файл api/ai.js в GitHub (инструкция у Claude в чате).',nokey:'Не вижу ключа нейросети: добавь GEMINI_API_KEY в настройках Vercel и сделай Redeploy.',badkey:'Ключ нейросети не принят. Проверь GEMINI_API_KEY в Vercel.',quota:'Бро, лимит запросов на сегодня исчерпан. Давай чуть позже.',timeout:'Что-то я задумался и завис. Напиши ещё раз.',slow:'Слишком быстро, дай секунду отдышаться.',net:'Нет связи с сервером. Проверь интернет.'}[c]||'Что-то пошло не так со связью. Попробуй ещё раз.');
 async function resolveTracks(list){
   const found=[];let missed=0;
   await Promise.all(list.map(async(w,k)=>{
@@ -1193,7 +1195,7 @@ function renderChat(){
   const p=prof(),hi=`<div class="arow"><div class="ava"></div><div class="msg a"><span class="tx">Йо, ${esc(p.name)}! Я твой музыкальный бро. Расскажи, как настроение: подберу музыку, разберём песню или научу её играть.</span></div></div>`;
   box.innerHTML=hi+aiMsgs.map(msgHtml).join('')+(AIX.sending?'<div class="arow"><div class="ava"></div><div class="msg a"><span class="tdots"><i></i><i></i><i></i></span></div></div>':'');
   markPlaying();
-  requestAnimationFrame(()=>{const b=document.querySelector('.aiin');(b||box).scrollIntoView({block:'end'})});
+  requestAnimationFrame(()=>window.scrollTo({top:document.documentElement.scrollHeight,behavior:'smooth'}));
 }
 function renderPrev(){const b=$('aiPrev');if(!b)return;b.innerHTML=AIX.img?`<img src="${esc(AIX.img.url)}" alt=""><button class="ib" data-act="aiimgx" aria-label="Убрать фото">${I('x',18)}</button>`:''}
 function shrinkImage(file){return new Promise(res=>{
@@ -1330,7 +1332,7 @@ function applyRate(r){try{au.playbackRate=r}catch(e){}try{if(mode==='yt'&&ytp)yt
 /* ---- рендер страницы AI ---- */
 function renderAI(){
   const p=prof();if(!p)return;aiLoad();
-  $('vAI').innerHTML=`<div class="aihead glass">${mgrHtml()}<div><h1 class="ainame">AI Manager</h1><div class="aist"><i></i><span id="aiSt">На связи</span></div><button class="gb vbtn" id="vmBtn" data-act="aivoice"></button></div></div>
+  $('vAI').innerHTML=`<div class="aihead glass">${mgrHtml()}<div><h1 class="ainame">Ужасный AI</h1><div class="aist"><i></i><span id="aiSt">На связи</span></div><button class="gb vbtn" id="vmBtn" data-act="aivoice"></button></div></div>
     <div class="seg">${[['chat','Чат'],['an','Разбор'],['play','Сыграть'],['mem','Память']].map(([k,l])=>`<button data-act="aitab" data-k="${k}" class="${AIX.tab===k?'on':''}">${l}</button>`).join('')}</div><div id="aiBody"></div>`;
   M.el=$('vAI').querySelector('.mgr');mgrState(voice.listening?'listening':'idle');blinkLoop();updVoiceBtn();renderAITab();
 }
