@@ -3,7 +3,7 @@
 const ALLOWED = [/^https:\/\/uzhasnyysong(-[a-z0-9-]+)?\.vercel\.app$/, /^http:\/\/localhost(:\d+)?$/];
 const hits = new Map();
 
-const PERSONA = `Ты — AI Manager, музыкальный бро внутри приложения «Ужасныйsong». Говоришь на языке пользователя (по умолчанию русский), неформально, тепло, с лёгким юмором, коротко: обычно 1–4 предложения, как друг в переписке.
+const PERSONA = `Ты — «Ужасный AI», музыкальный бро внутри приложения «Ужасныйsong». Говоришь на языке пользователя (по умолчанию русский), неформально, тепло, с лёгким юмором, коротко: обычно 1–4 предложения, как друг в переписке.
 Эмпатия: если человеку грустно или тяжело — сначала поддержи и расспроси, не спеши с музыкой. Можешь поговорить по душам.
 Не навязывай рекомендации: предлагай треки, когда просят, когда спрашивают про настроение или когда это явно в тему.
 Знаешь жанры, исполнителей, альбомы, историю песен, теорию музыки, инструменты.
@@ -58,23 +58,32 @@ function buildUser(mode, b) {
   return about;
 }
 
-async function callGemini(system, msgs, image) {
+async function callGemini(system, msgs, image, mode) {
   const key = process.env.GEMINI_API_KEY;
   const contents = msgs.map((m, i) => {
     const parts = [{ text: m.text }];
     if (image && i === msgs.length - 1) parts.unshift({ inlineData: { mimeType: 'image/jpeg', data: image } });
     return { role: m.role === 'ai' ? 'model' : 'user', parts };
   });
-  const models = [process.env.GEMINI_MODEL, 'gemini-flash-latest', 'gemini-2.5-flash'].filter(Boolean);
+  // быстрые модели первыми: чат должен отвечать за пару секунд
+  const order = mode === 'chat'
+    ? ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-2.5-flash-lite', 'gemini-2.5-flash']
+    : ['gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+  const models = [...new Set([process.env.GEMINI_MODEL, ...order].filter(Boolean))];
   let last = '';
   for (const model of models) {
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents,
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.9, maxOutputTokens: 2048 } })
-    });
+    const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 25000);
+    let r;
+    try {
+      r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST', signal: ctl.signal, headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents,
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.9, maxOutputTokens: 4096 } })
+      });
+    } catch (e) { clearTimeout(timer); throw new Error(e.name === 'AbortError' ? 'timeout' : 'net'); }
+    clearTimeout(timer);
     const d = await r.json().catch(() => ({}));
-    if (r.ok) return (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+    if (r.ok) { callGemini.used = model; return (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join(''); }
     last = d.error?.status || String(r.status);
     if (r.status === 429) throw new Error('quota');
     if (r.status === 400 && /API key/i.test(d.error?.message || '')) throw new Error('badkey');
@@ -103,9 +112,22 @@ module.exports = async (req, res) => {
   if (origin && !ALLOWED.some(r => r.test(origin))) return res.status(403).json({ error: 'origin' });
   if (origin) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
   if (req.method === 'OPTIONS') { res.setHeader('Access-Control-Allow-Headers', 'content-type'); return res.status(204).end(); }
-  if (req.method !== 'POST') return res.status(405).json({ error: 'method' });
-  if (!process.env.GEMINI_API_KEY && !process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'nokey' });
+  const hasKey = !!(process.env.GEMINI_API_KEY || process.env.ANTHROPIC_API_KEY);
   const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0] || 'x';
+  if (req.method === 'GET') {
+    // самопроверка: /api/ai?diag=1 — без ключа и текста разговора в ответе
+    if (!req.query || !req.query.diag) return res.status(200).json({ ok: true, service: 'Ужасный AI', key: hasKey });
+    if (!hasKey) return res.status(200).json({ ok: false, error: 'nokey' });
+    if (rateLimited(ip)) return res.status(429).json({ error: 'slow' });
+    const t0 = Date.now();
+    try {
+      const raw = process.env.ANTHROPIC_API_KEY ? await callAnthropic('Ответь JSON {"pong":true}', [{ role: 'user', text: 'ping' }])
+        : await callGemini('Ответь JSON {"pong":true}', [{ role: 'user', text: 'ping' }], null, 'chat');
+      return res.status(200).json({ ok: !!parseJSON(raw), model: callGemini.used || 'anthropic', ms: Date.now() - t0 });
+    } catch (e) { return res.status(200).json({ ok: false, error: String(e.message || e).slice(0, 80), ms: Date.now() - t0 }); }
+  }
+  if (req.method !== 'POST') return res.status(405).json({ error: 'method' });
+  if (!hasKey) return res.status(503).json({ error: 'nokey' });
   if (rateLimited(ip)) return res.status(429).json({ error: 'slow' });
 
   const b = typeof req.body === 'string' ? (parseJSON(req.body) || {}) : (req.body || {});
@@ -121,12 +143,14 @@ module.exports = async (req, res) => {
   const system = PERSONA + '\n\n' + FORMATS[mode] + (mode === 'chat' && about ? '\n\n' + about : '');
 
   try {
-    const raw = process.env.ANTHROPIC_API_KEY ? await callAnthropic(system, msgs, image) : await callGemini(system, msgs, image);
+    const raw = process.env.ANTHROPIC_API_KEY ? await callAnthropic(system, msgs, image) : await callGemini(system, msgs, image, mode);
     const data = parseJSON(raw);
     if (!data) return res.status(502).json({ error: 'format' });
     return res.status(200).json({ ok: true, data });
   } catch (e) {
     const m = String(e.message || e);
-    return res.status(m === 'quota' ? 429 : 502).json({ error: m === 'quota' ? 'quota' : m === 'badkey' ? 'badkey' : 'provider', detail: m.slice(0, 80) });
+    const code = ['quota', 'badkey', 'timeout'].includes(m) ? m : 'provider';
+    return res.status(m === 'quota' ? 429 : m === 'timeout' ? 504 : 502).json({ error: code, detail: m.slice(0, 80) });
   }
 };
+module.exports.config = { maxDuration: 60 };
