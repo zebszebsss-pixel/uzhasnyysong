@@ -280,7 +280,7 @@ body.yton{padding-bottom:calc(400px + env(safe-area-inset-bottom))}
 .tc .why{font-size:12px;color:var(--ash);margin-top:4px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .tc.on{border-color:var(--red)}
 .tc .play{background:var(--red);border-color:var(--red);color:#fff}
-.aiin{position:sticky;bottom:calc(84px + var(--minih,0px) + env(safe-area-inset-bottom));z-index:3;padding:10px 0 6px;background:linear-gradient(180deg,transparent,var(--bg) 22%)}
+.aiin{position:sticky;bottom:calc(84px + var(--minih,0px) + env(safe-area-inset-bottom));z-index:3;padding:8px 0 6px;margin:0 -18px;padding-left:18px;padding-right:18px;background:var(--bg);box-shadow:0 -14px 18px var(--bg)}
 .aibar{display:flex;align-items:flex-end;gap:6px;padding:6px;border-radius:24px;background:rgba(26,26,29,.96);border:1px solid var(--line)}
 .aibar textarea{flex:1;min-height:40px;max-height:120px;padding:9px 6px;border:0;background:none;resize:none;font-size:16px}
 .aibar .ib{width:40px;height:40px;min-height:40px;flex:none}
@@ -388,7 +388,7 @@ select{font:15px Manrope,sans-serif;min-height:40px;padding:0 10px;border-radius
 
 <script>
 {
-const APP='Ужасныйsong',VER='5.1';
+const APP='Ужасныйsong',VER='5.3';
 /* Ключ YouTube Data API для полных песен. Можно вставить сюда или в Настройках приложения. */
 const YT_KEY='';
 const $=id=>document.getElementById(id);
@@ -531,7 +531,9 @@ function unlock(){silentOn=true;au.src=SILENT;au.play().catch(()=>{})}
 /* ---- YouTube: полные песни ---- */
 let mode='audio',ytp=null,ytCur=null,ytTimer=0,ytHint=false;
 const ytKey=()=>S.ytKey||YT_KEY;
-const fullOn=()=>{const p=prof();return!!ytKey()&&!(p&&p.settings.full===false)};
+let ytServer=false;
+if(/^https?:/.test(location.protocol))fetch('/api/ai').then(r=>r.json()).then(j=>{ytServer=!!(j&&j.yt)}).catch(()=>{});
+const fullOn=()=>{const p=prof();return(!!ytKey()||ytServer)&&!(p&&p.settings.full===false)};
 const isPaused=()=>mode==='yt'?!(ytp&&ytp.getPlayerState&&ytp.getPlayerState()===1):au.paused;
 function ytReady(){
   if(window.YT&&YT.Player)return Promise.resolve();
@@ -544,6 +546,12 @@ function ytReady(){
 async function ytFind(t){
   S.yt=S.yt||{};if(S.yt[t.id]&&S.yt[t.id].length)return S.yt[t.id];
   const q=encodeURIComponent(t.artist+' - '+t.name+' audio');
+  if(!ytKey()){
+    const r=await fetch('/api/ai?yt='+q);const d=await r.json().catch(()=>({}));
+    if(d.error)throw new Error(d.error);
+    const ids=d.ids||[];if(ids.length){S.yt[t.id]=ids;const k=Object.keys(S.yt);if(k.length>600)delete S.yt[k[0]];save()}
+    return ids;
+  }
   const r=await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoEmbeddable=true&maxResults=3&q=${q}&key=${encodeURIComponent(ytKey())}`);
   const d=await r.json().catch(()=>({}));
   if(!r.ok){const why=d.error&&d.error.errors&&d.error.errors[0]&&d.error.errors[0].reason;throw new Error(why||('http '+r.status))}
@@ -831,8 +839,8 @@ function renderSub(){
     p.notifs.forEach(n=>n.read=true);save();updBell();
   }else if(k==='settings'){
     v.innerHTML=subHead('Настройки')+`<h2>Полные песни</h2><div class="glass" style="padding:4px 16px 16px">
-      <label class="sw" style="padding:12px 0"><span>Играть полные песни через YouTube</span><input type="checkbox" id="sFull" ${ytKey()&&p.settings.full!==false?'checked':''} ${ytKey()?'':'disabled'}></label>
-      <p class="note" style="margin:0">${ytKey()?'Ключ YouTube подключён ✓. Песня играет целиком в видеоокне над плеером: так требуют правила YouTube.':'Нужен бесплатный ключ YouTube Data API. Вставь его сюда, и песни будут играть целиком.'}</p>
+      <label class="sw" style="padding:12px 0"><span>Играть полные песни через YouTube</span><input type="checkbox" id="sFull" ${(ytKey()||ytServer)&&p.settings.full!==false?'checked':''} ${ytKey()||ytServer?'':'disabled'}></label>
+      <p class="note" style="margin:0">${ytServer&&!ytKey()?'Полные песни включены для всех ✓ Песня играет целиком в видеоокне над плеером: так требуют правила YouTube. Свой ключ не нужен.':ytKey()?'Ключ YouTube подключён ✓. Песня играет целиком в видеоокне над плеером: так требуют правила YouTube.':'Нужен бесплатный ключ YouTube Data API. Вставь его сюда, и песни будут играть целиком.'}</p>
       <div style="display:flex;gap:8px;margin-top:10px"><input id="ytKeyIn" placeholder="Ключ API (AIza…)" value="${esc(S.ytKey||'')}" autocapitalize="off" autocorrect="off" spellcheck="false"><button class="pri" data-act="ytkey">OK</button></div></div>
       <h2>Воспроизведение</h2><div class="glass">
       <label class="sw"><span>Автоматически включать следующий трек</span><input type="checkbox" id="sAuto" ${p.settings.autoplay?'checked':''}></label>
@@ -1088,7 +1096,12 @@ function aiPrefs(){const a=aiP(),p=prof();if(!a.consent.prefs)return{};
   const top=new Map();p.favorites.forEach(t=>{if(t.artist&&!t.id.startsWith('up:'))top.set(t.artist,(top.get(t.artist)||0)+1)});
   const fav=[...top].sort((x,y)=>y[1]-x[1]).slice(0,6).map(x=>x[0]);
   return Object.assign({},a.prefs,{artists:[...new Set([...a.prefs.artists,...fav])]})}
-async function aiCall(body){
+async function aiCall(body,retry=1){
+  const r=await aiCall1(body);
+  if(r.error&&retry>0&&['provider','format','timeout','net','bad','http500','http502','http504'].includes(r.error)){await new Promise(s=>setTimeout(s,900));return aiCall(body,retry-1)}
+  return r;
+}
+async function aiCall1(body){
   if(!/^https?:/.test(location.protocol))return{error:'local'};
   const ctl=new AbortController(),tm=setTimeout(()=>ctl.abort(),45000);
   try{
@@ -1096,7 +1109,7 @@ async function aiCall(body){
     clearTimeout(tm);
     if(r.status===404||r.status===405)return{error:'noapi'};
     const d=await r.json().catch(()=>({error:'bad'}));
-    if(!r.ok||d.error)return{error:d.error||('http'+r.status)};
+    if(!r.ok||d.error)return{error:d.error||('http'+r.status),detail:d.detail||''};
     return d;
   }catch(e){clearTimeout(tm);return{error:e&&e.name==='AbortError'?'timeout':'net'}}
 }
@@ -1165,11 +1178,11 @@ async function aiSend(text){
   text=String(text||'').trim();if((!text&&!AIX.img)||AIX.sending)return;
   aiLoad();const a=aiP(),img=AIX.img;AIX.img=null;renderPrev();
   const um={role:'user',text:text||'Глянь на это фото и подбери музыку под его настроение.',at:Date.now()};if(img){um.img=true;um.imgUrl=img.url}
-  aiMsgs.push(um);AIX.moodOpen=false;renderChat();mgrNod();mgrState('thinking');AIX.sending=true;
+  aiMsgs.push(um);AIX.moodOpen=false;{const mm=$('aiMood');if(mm)mm.hidden=true}renderChat();mgrNod();mgrState('thinking');AIX.sending=true;
   const recent=a.consent.prefs?prof().history.slice(0,8).map(h=>h.t.artist+' — '+h.t.name):[];
   const res=await aiCall({mode:'chat',messages:aiMsgs.filter(m=>!m.sys).slice(-16).map(m=>({role:m.role,text:m.text})),prefs:aiPrefs(),recent,image:img&&img.b64});
   AIX.sending=false;
-  if(res.error){aiMsgs.push({role:'ai',text:aiErr(res.error),at:Date.now(),sys:true});mgrState('idle','sad');renderChat();return}
+  if(res.error){aiMsgs.push({role:'ai',text:aiErr(res.error)+(['quota','nokey','noapi','local','slow'].includes(res.error)?'':'\n(код: '+res.error+(res.detail?' · '+res.detail:'')+')'),at:Date.now(),sys:true});mgrState('idle','sad');renderChat();return}
   const d=res.data||{},m={role:'ai',text:String(d.reply||'…').slice(0,3000),at:Date.now(),emo:EMO_MOUTH[d.emotion]?d.emotion:'neutral'};
   if(a.consent.prefs&&d.remember&&rememberPrefs(d.remember))toast('Запомнил твои вкусы');
   aiMsgs.push(m);const idx=aiMsgs.length-1;
