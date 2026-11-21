@@ -49,6 +49,12 @@ function parseJSON(t) {
   if (m) { try { return JSON.parse(m[0]); } catch (e) {} }
   return null;
 }
+function rescueReply(t) {
+  const m = String(t).match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  if (m) { try { return { reply: JSON.parse('"' + m[1].replace(/\\$/, '') + '"'), emotion: 'neutral', tracks: [] }; } catch (e) {} }
+  const plain = String(t).replace(/[{}\[\]"]/g, ' ').trim();
+  return plain && !/^\s*$/.test(plain) && !/"(summary|chords)"/.test(t) ? { reply: plain.slice(0, 1500), emotion: 'neutral', tracks: [] } : null;
+}
 function buildUser(mode, b) {
   const prefs = b.prefs || {}, ctx = [];
   const list = k => Array.isArray(prefs[k]) && prefs[k].length ? prefs[k].slice(0, 15).join(', ') : '';
@@ -83,7 +89,8 @@ async function callGemini(system, msgs, image, mode) {
     ? ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-2.5-flash-lite', 'gemini-2.5-flash']
     : ['gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
   const models = [...new Set([process.env.GEMINI_MODEL, ...order].filter(Boolean))];
-  let last = '', sawQuota = false;
+  let last = '', sawQuota = false, rescue = '';
+  callGemini.log = [];
   for (const model of models) {
     const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 25000);
     let r;
@@ -91,23 +98,28 @@ async function callGemini(system, msgs, image, mode) {
       r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: 'POST', signal: ctl.signal, headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
         body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents,
-          generationConfig: { responseMimeType: 'application/json', temperature: 0.9, maxOutputTokens: 4096 } })
+          generationConfig: Object.assign({ responseMimeType: 'application/json', temperature: 0.9, maxOutputTokens: 8192 },
+            /2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}) })
       });
-    } catch (e) { clearTimeout(timer); last = e.name === 'AbortError' ? 'timeout' : 'net'; if (last === 'timeout') throw new Error('timeout'); continue; }
+    } catch (e) { clearTimeout(timer); last = e.name === 'AbortError' ? 'timeout' : 'net'; callGemini.log.push(last + ' ' + model.replace('gemini-', '')); if (last === 'timeout') break; continue; }
     clearTimeout(timer);
     const d = await r.json().catch(() => ({}));
     if (r.ok) {
-      const text = (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+      const c = d.candidates?.[0] || {}, text = (c.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
       if (parseJSON(text)) { callGemini.used = model; return text; }
-      last = 'format ' + model; continue;            // кривой JSON — пробуем другую модель
+      if (!rescue && text) rescue = text;            // обрезанный ответ — сохраним на крайний случай
+      last = 'format/' + (c.finishReason || (d.promptFeedback?.blockReason ? 'blocked' : 'empty')) + ' ' + model.replace('gemini-', '');
+      callGemini.log.push(last); continue;           // кривой JSON — пробуем другую модель
     }
-    last = (d.error?.status || r.status) + ' ' + model;
+    last = (r.status) + ' ' + model.replace('gemini-', '');
+    callGemini.log.push(last);
     if (r.status === 400 && /API key/i.test(d.error?.message || '')) throw new Error('badkey');
     if (r.status === 403) throw new Error('badkey');
     if (r.status === 429) sawQuota = true;           // лимиты у каждой модели свои — пробуем следующую
   }
+  if (rescue) { callGemini.used = 'rescue'; return rescue; }
   if (sawQuota) throw new Error('quota');
-  throw new Error('provider ' + last);
+  throw new Error('provider ' + callGemini.log.join('; '));
 }
 async function callAnthropic(system, msgs, image) {
   const messages = msgs.map((m, i) => {
@@ -171,13 +183,15 @@ module.exports = async (req, res) => {
 
   try {
     const raw = process.env.ANTHROPIC_API_KEY ? await callAnthropic(system, msgs, image) : await callGemini(system, msgs, image, mode);
-    const data = parseJSON(raw);
-    if (!data) return res.status(502).json({ error: 'format' });
+    let data = parseJSON(raw);
+    if (!data && mode === 'chat') data = rescueReply(raw);
+    if (!data) return res.status(502).json({ error: 'format', detail: (callGemini.log || []).join('; ').slice(0, 120) });
     return res.status(200).json({ ok: true, data });
   } catch (e) {
     const m = String(e.message || e);
+    console.error('ai error', m);
     const code = ['quota', 'badkey', 'timeout'].includes(m) ? m : 'provider';
-    return res.status(m === 'quota' ? 429 : m === 'timeout' ? 504 : 502).json({ error: code, detail: m.slice(0, 80) });
+    return res.status(m === 'quota' ? 429 : m === 'timeout' ? 504 : 502).json({ error: code, detail: m.replace(/^provider /, '').slice(0, 120) });
   }
 };
 module.exports.config = { maxDuration: 60 };
