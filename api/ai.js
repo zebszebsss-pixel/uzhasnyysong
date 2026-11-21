@@ -25,6 +25,19 @@ remember: только то, что пользователь САМ прямо �
 Правила: только названия аккордов стандартного вида (C, Am, F#m, Bb7, Cmaj7, Dsus4, G/B). Никогда не выдумывай ноты мелодии и табулатуры. status="known" только если уверен, что это общеизвестная гармония песни; иначе "adaptation" (упрощённая адаптация в похожем духе) и скажи об этом в note. Для фортепиано опиши левую/правую руку, для баса — корневые ноты. Если не знаешь BPM — null.`
 };
 
+const ytCache = new Map(), ytHits = new Map();
+async function ytSearch(q) {
+  q = String(q || '').trim().slice(0, 200);
+  if (!q) return { error: 'empty' };
+  if (ytCache.has(q)) return { ids: ytCache.get(q), cached: true };
+  const url = 'https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoEmbeddable=true&maxResults=3&q=' + encodeURIComponent(q) + '&key=' + encodeURIComponent(process.env.YOUTUBE_API_KEY);
+  const r = await fetch(url, { headers: { Referer: 'https://uzhasnyysong.vercel.app/' } });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return { error: d.error?.errors?.[0]?.reason || ('http' + r.status) };
+  const ids = (d.items || []).map(x => x.id && x.id.videoId).filter(Boolean);
+  if (ids.length) { ytCache.set(q, ids); if (ytCache.size > 2000) ytCache.delete(ytCache.keys().next().value); }
+  return { ids };
+}
 function rateLimited(ip) {
   const now = Date.now(), arr = (hits.get(ip) || []).filter(t => now - t < 60000);
   arr.push(now); hits.set(ip, arr);
@@ -70,7 +83,7 @@ async function callGemini(system, msgs, image, mode) {
     ? ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-2.5-flash-lite', 'gemini-2.5-flash']
     : ['gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
   const models = [...new Set([process.env.GEMINI_MODEL, ...order].filter(Boolean))];
-  let last = '';
+  let last = '', sawQuota = false;
   for (const model of models) {
     const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 25000);
     let r;
@@ -80,15 +93,20 @@ async function callGemini(system, msgs, image, mode) {
         body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents,
           generationConfig: { responseMimeType: 'application/json', temperature: 0.9, maxOutputTokens: 4096 } })
       });
-    } catch (e) { clearTimeout(timer); throw new Error(e.name === 'AbortError' ? 'timeout' : 'net'); }
+    } catch (e) { clearTimeout(timer); last = e.name === 'AbortError' ? 'timeout' : 'net'; if (last === 'timeout') throw new Error('timeout'); continue; }
     clearTimeout(timer);
     const d = await r.json().catch(() => ({}));
-    if (r.ok) { callGemini.used = model; return (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join(''); }
-    last = d.error?.status || String(r.status);
-    if (r.status === 429) throw new Error('quota');
+    if (r.ok) {
+      const text = (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+      if (parseJSON(text)) { callGemini.used = model; return text; }
+      last = 'format ' + model; continue;            // кривой JSON — пробуем другую модель
+    }
+    last = (d.error?.status || r.status) + ' ' + model;
     if (r.status === 400 && /API key/i.test(d.error?.message || '')) throw new Error('badkey');
-    if (r.status !== 404 && r.status !== 400) break;
+    if (r.status === 403) throw new Error('badkey');
+    if (r.status === 429) sawQuota = true;           // лимиты у каждой модели свои — пробуем следующую
   }
+  if (sawQuota) throw new Error('quota');
   throw new Error('provider ' + last);
 }
 async function callAnthropic(system, msgs, image) {
@@ -115,8 +133,17 @@ module.exports = async (req, res) => {
   const hasKey = !!(process.env.GEMINI_API_KEY || process.env.ANTHROPIC_API_KEY);
   const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0] || 'x';
   if (req.method === 'GET') {
+    const q = req.query || {};
+    // полные песни: /api/ai?yt=исполнитель - песня
+    if (q.yt) {
+      if (!process.env.YOUTUBE_API_KEY) return res.status(200).json({ error: 'noyt' });
+      const now = Date.now(), arr = (ytHits.get(ip) || []).filter(t => now - t < 60000); arr.push(now); ytHits.set(ip, arr);
+      if (arr.length > 30) return res.status(429).json({ error: 'slow' });
+      try { const out = await ytSearch(q.yt); if (out.ids) res.setHeader('Cache-Control', 'public, s-maxage=604800'); return res.status(200).json(out); }
+      catch (e) { return res.status(200).json({ error: 'net' }); }
+    }
     // самопроверка: /api/ai?diag=1 — без ключа и текста разговора в ответе
-    if (!req.query || !req.query.diag) return res.status(200).json({ ok: true, service: 'Ужасный AI', key: hasKey });
+    if (!q.diag) return res.status(200).json({ ok: true, service: 'Ужасный AI', key: hasKey, yt: !!process.env.YOUTUBE_API_KEY });
     if (!hasKey) return res.status(200).json({ ok: false, error: 'nokey' });
     if (rateLimited(ip)) return res.status(429).json({ error: 'slow' });
     const t0 = Date.now();
